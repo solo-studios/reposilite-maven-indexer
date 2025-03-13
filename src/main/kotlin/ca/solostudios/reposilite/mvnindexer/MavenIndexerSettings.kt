@@ -4,7 +4,6 @@ import com.reposilite.configuration.shared.api.Doc
 import com.reposilite.configuration.shared.api.Min
 import com.reposilite.configuration.shared.api.SharedSettings
 import io.javalin.openapi.JsonSchema
-import java.io.Serial
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.days
 import kotlin.time.Duration.Companion.hours
@@ -21,73 +20,52 @@ public data class MavenIndexerSettings(
     @get:Doc(
         title = "Enabled",
         description = """
-            If building the maven indexes is enabled. Defaults to false.
+            If building the maven indexes is enabled.<br>
+            Defaults to false.
         """
     )
     val enabled: Boolean = false,
     @get:Doc(
         title = "Searchable",
         description = """
-            Enable searching via Maven Indexer. Defaults to false.
+            Enable searching via Maven Indexer.<br>
+            Defaults to false.
         """
     )
-    val searchable: Boolean = false,
+    val searchable: Boolean = false, // TODO: 2025-03-12 Implement this
     @get:Doc(
         title = "Index Path",
         description = """
-            The path for the maven index. Defaults to '.maven-index/'.
+            The path for the maven index.<br>
+            Defaults to '.maven-index/'.
         """
     )
     val indexPath: String = ".maven-index/",
     @get:Doc(
         title = "Incremental Chunks",
         description = """
-            Create incremental index chunks. Defaults to true.
+            Create incremental index chunks.<br>
+            Defaults to true.
         """
     )
-    val incrementalChunks: Boolean = true,
+    val incrementalChunks: Boolean = true, // TODO: 2025-03-12 This is broken
     @Min(min = 1)
     @get:Doc(
         title = "Incremental Chunks Count",
         description = """
-            The number of incremental chunks to keep. Defaults to 32.
+            The number of incremental chunks to keep.<br>
+            Defaults to 32.
         """
     )
     val incrementalChunksCount: Int = 32,
     @get:Doc(
         title = "Create Checksum Files",
         description = """
-            Create checksums for all files (sha1, md5, etc.). Defaults to true.
+            Create checksums for all files (sha1, md5, etc.).<br>
+            Defaults to true.
         """
     )
     val createChecksumFiles: Boolean = false,
-    @get:Doc(
-        title = "Indexers",
-        description = """
-            A list of indexers used to index the maven repository. Defaults to the minimal and jar indexers.<br><br>
-
-            The available indexers are:
-            <ul>
-                <li>JAR_CONTENT (Indexes class names)</li>
-                <li>MAVEN_ARCHETYPE (Indexes maven archetypes)</li>
-                <li>MAVEN_PLUGIN (Indexes maven plugins)</li>
-                <li>MINIMAL (Indexes group id, artifact id, version, packaging type, classifier, name, description, last modified, sha1 hash)</li>
-                <li>OSGI_METADATAS (Indexes OSGi metadata)</li>
-                <li>FULL (All indexers)</li>
-            </ul>
-        """,
-    )
-    val indexers: Set<MavenIndexer> = setOf(MavenIndexer.MINIMAL, MavenIndexer.JAR_CONTENT),
-    @get:Doc(
-        title = "Full Indexing Scan Interval",
-        description = """
-            How often Reposilite should attempt a full scan to re-index the maven repository.<br>
-            With smaller durations the index is updated sooner, but it can significantly increase server load.<br>
-            For smaller instances, this should ideally be kept low, but on more powerful servers it can be increased appropriately.<br>
-            Defaults to daily.
-        """
-    )
-    val mavenIndexFullScanInterval: MavenIndexInterval = MavenIndexInterval.DAILY,
     @get:Doc(
         title = "Continuous Index Updates",
         description = """
@@ -108,20 +86,110 @@ public data class MavenIndexerSettings(
         """
     )
     val maxParallelIndexRepositories: Int = 1,
+    @get:Doc(
+        title = "Indexing Tasks",
+        description = """
+            List of indexing tasks.
+        """
+    )
+    val indexingTasks: List<IndexingTaskSettings> = listOf(
+        IndexingTaskSettings(reference = "default")
+    ),
 ) : SharedSettings {
-    public enum class MavenIndexer(
-        public val dependencies: List<MavenIndexer>
-    ) {
-        MINIMAL,
-        JAR_CONTENT,
-        OSGI_METADATA,
-        MAVEN_ARCHETYPE(MINIMAL),
-        MAVEN_PLUGIN(MINIMAL),
-        MAVEN_EXTRA(MINIMAL),
-        FULL;
+    public data class IndexingTaskSettings(
+        @get:Doc(
+            title = "Name",
+            description = "The name is not used for anything. This is only for the UI."
+        )
+        val reference: String = "",
+        @get:Doc(
+            title = "Enabled",
+            description = """
+                If this particular indexing task is enabled or not.<br>
+                Defaults to true.
+            """
+        )
+        val enabled: Boolean = true,
+        @get:Doc(
+            title = "Indexing Interval",
+            description = """
+                How often Reposilite should attempt a full scan to re-index the maven repository.<br>
+                With smaller durations the index is updated sooner, but it can significantly increase server load.<br>
+                For smaller instances, this should ideally be kept low, but on more powerful servers it can be increased appropriately.<br>
+                Defaults to daily.
+            """
+        )
+        val interval: MavenIndexInterval = MavenIndexInterval.DAILY,
+        @get:Doc(
+            title = "Continuous Updates",
+            description = """
+                Continuously updates the index, as new artifacts are uploaded.<br>
+                The full scan will still run in the background, however the artifacts indexed by this will not need to be re-indexed.<br>
+                Defaults to false.
+            """
+        )
+        val continuous: Boolean = false, // TODO: 2025-03-12 Implement this
+        // adding @get:Doc() converts it to allOf()
+        // https://github.com/dzikoysk/reposilite/issues/1320
+        val indexers: EnabledIndexersSettings = EnabledIndexersSettings(),
+    ) : SharedSettings {
+        private companion object {
+            private const val serialVersionUID: Long = 4340096276913889427L
+        }
+    }
 
-        constructor() : this(listOf())
-        constructor(dependency: MavenIndexer) : this(listOf(dependency))
+    @Doc("Enabled Indexer Settings", "")
+    public data class EnabledIndexersSettings(
+        @get:Doc(
+            title = "Minimal Indexer",
+            description = """
+                Indexes a minimal set of things.
+            """
+        )
+        val minimal: Boolean = true,
+        @get:Doc(
+            title = "Maven Extra Indexer",
+            description = """
+                Indexes several misc. things, such as sha256, sha512, md5, license, url, etc.<br>
+                Will implicitly enable the minimal indexer.
+            """
+        )
+        val mavenExtra: Boolean = false,
+        @get:Doc(
+            title = "Maven Archetype Indexer",
+            description = """
+                Indexes maven archetype metadata.<br>
+                Will implicitly enable the minimal indexer.
+            """
+        )
+        val mavenArchetype: Boolean = false,
+        @get:Doc(
+            title = "Maven Plugin Indexer",
+            description = """
+                Indexes maven plugin metadata.<br>
+                Will implicitly enable the minimal indexer.
+            """
+        )
+        val mavenPlugin: Boolean = false,
+        @get:Doc(
+            title = "OSGI Metadata Indexer",
+            description = """
+                Indexes OSGI Metadata.
+            """
+        )
+        val osgiMetadata: Boolean = false,
+        @get:Doc(
+            title = "Jar Contents Indexer",
+            description = """
+                Indexes all the classnames within a jar.<br>
+                Will implicitly enable the minimal indexer.
+            """
+        )
+        val jarContent: Boolean = false,
+    ) : SharedSettings {
+        private companion object {
+            private const val serialVersionUID: Long = -122169967566568022L
+        }
     }
 
     public enum class MavenIndexInterval(public val duration: Duration) {
@@ -134,7 +202,6 @@ public data class MavenIndexerSettings(
     }
 
     private companion object {
-        @Serial
-        private const val serialVersionUID: Long = -2129710622647039295L
+        private const val serialVersionUID: Long = -5188044794320568099L
     }
 }

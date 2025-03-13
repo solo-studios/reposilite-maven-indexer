@@ -1,16 +1,17 @@
 [versions]
-kotlin = "2.0.20"
-ksp = "2.0.20-1.0.25"
+kotlin = "2.1.10"
+ksp = "2.1.10-1.0.31"
 dokka = "1.9.20"
-shadow = "8.3.5"
+shadow = "8.3.6"
 nyx = "0.2.3"
-kotlinx-datetime = "0.6.1"
+kotlinx-datetime = "0.6.2"
 slf4j = "2.0.16"
-reposilite = "3.5.19"
+reposilite = "3.5.22"
+javalin = "6.5.0"
 maven-indexer = "7.1.5"
-lucene = "9.11.1"
+lucene = "9.12.1"
 dsiutils = "2.7.2"
-junit-jupiter = "5.9.1"
+junit-jupiter = "5.12.0"
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
@@ -37,8 +38,8 @@ kotlinx-datetime = { group = "org.jetbrains.kotlinx", name = "kotlinx-datetime",
 ##
 reposilite = { group = "com.reposilite", name = "reposilite", version.ref = "reposilite" }
 
-javalin-openapi-plugin = { group = "io.javalin.community.openapi", name = "javalin-openapi-plugin", version = "6.3.0" }
-javalin-openapi-processor = { group = "io.javalin.community.openapi", name = "openapi-annotation-processor", version = "6.3.0" }
+javalin-openapi-plugin = { group = "io.javalin.community.openapi", name = "javalin-openapi-plugin", version.ref = "javalin" }
+javalin-openapi-processor = { group = "io.javalin.community.openapi", name = "openapi-annotation-processor", version.ref = "javalin" }
 
 # Guava
 ## A set of core Java libraries from Google that includes new collection types, immutable collections, a graph library,

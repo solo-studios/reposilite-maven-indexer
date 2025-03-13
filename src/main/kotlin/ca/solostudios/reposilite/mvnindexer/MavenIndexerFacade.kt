@@ -25,13 +25,13 @@ public class MavenIndexerFacade internal constructor(
         rebuild: Boolean = false
     ): Result<Unit, ErrorResponse> {
         return if (rebuild)
-            mavenIndexerService.rebuildIndex(repository, startPath)
+            mavenIndexerService.rebuildIndex(repository, startPath, mavenIndexerService.allIndexers())
         else
-            mavenIndexerService.incrementalIndex(repository, startPath)
+            mavenIndexerService.incrementalIndex(repository, startPath, mavenIndexerService.allIndexers())
     }
 
     public fun indexAllRepositories(startPath: Location = Location.empty()): Result<Unit, ErrorResponse> {
-        return mavenIndexerService.incrementalIndex(startPath)
+        return mavenIndexerService.incrementalIndex(startPath, mavenIndexerService.allIndexers())
     }
 
     public fun purgeRepository(
@@ -40,7 +40,7 @@ public class MavenIndexerFacade internal constructor(
         rebuild: Boolean = false
     ): Result<Unit, ErrorResponse> {
         return if (rebuild)
-            mavenIndexerService.rebuildIndex(repository, startPath)
+            mavenIndexerService.rebuildIndex(repository, startPath, mavenIndexerService.allIndexers())
         else
             mavenIndexerService.purgeIndex(repository, startPath)
     }
@@ -61,7 +61,7 @@ public class MavenIndexerFacade internal constructor(
         return mavenIndexerService.findInputStream(lookupRequest)
     }
 
-    internal fun shutdown() = mavenIndexerService.shutdown()
+    internal fun shutdown() = mavenIndexerService.stopIndexingTasks()
 
     override fun getLogger(): Logger = journalist.logger
 }

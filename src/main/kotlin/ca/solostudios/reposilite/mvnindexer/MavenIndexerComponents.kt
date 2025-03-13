@@ -1,6 +1,5 @@
 package ca.solostudios.reposilite.mvnindexer
 
-import ca.solostudios.reposilite.mvnindexer.MavenIndexerSettings.MavenIndexer
 import ca.solostudios.reposilite.mvnindexer.index.creator.MavenExtraArtifactInfoIndexCreator
 import ca.solostudios.reposilite.mvnindexer.infrastructure.MavenIndexerService
 import com.reposilite.Reposilite
@@ -22,8 +21,10 @@ import org.apache.maven.index.DefaultQueryCreator
 import org.apache.maven.index.DefaultScanner
 import org.apache.maven.index.DefaultSearchEngine
 import org.apache.maven.index.Indexer
+import org.apache.maven.index.IndexerEngine
 import org.apache.maven.index.ScanningRequest
 import org.apache.maven.index.artifact.DefaultArtifactPackagingMapper
+import org.apache.maven.index.context.IndexCreator
 import org.apache.maven.index.context.IndexingContext
 import org.apache.maven.index.creator.JarFileContentsIndexCreator
 import org.apache.maven.index.creator.MavenArchetypeArtifactInfoIndexCreator
@@ -64,6 +65,7 @@ internal class MavenIndexerComponents(
     fun indexingContext(
         repository: Repository,
         indexer: Indexer,
+        indexers: List<IndexCreator>,
         fsProvider: FileSystemStorageProvider,
     ) = indexer.createIndexingContext(
         repository.name,
@@ -74,7 +76,7 @@ internal class MavenIndexerComponents(
         null,
         settings().searchable,
         false,
-        indexCreators(settings().indexers),
+        indexers,
     )
 
     fun scanner() = DefaultScanner(artifactContextProducer())
@@ -113,22 +115,25 @@ internal class MavenIndexerComponents(
         return Executors.newScheduledThreadPool(maxThreads, NamedThreadFactory("Maven Indexer ($maxThreads) - "))
     }
 
-    private fun indexCreators(indexers: Set<MavenIndexer>) = indexers.asSequence().flatMap {
-        if (it == MavenIndexer.FULL)
-            MavenIndexer.entries - MavenIndexer.FULL
-        else
-            it.dependencies + it
-    }.distinct().flatMap {
-        when (it) {
-            MavenIndexer.FULL        -> error("Should never happen")
-            MavenIndexer.MINIMAL         -> listOf(MinimalArtifactInfoIndexCreator())
-            MavenIndexer.JAR_CONTENT     -> listOf(JarFileContentsIndexCreator())
-            MavenIndexer.MAVEN_ARCHETYPE -> listOf(MavenArchetypeArtifactInfoIndexCreator())
-            MavenIndexer.MAVEN_PLUGIN    -> listOf(MavenPluginArtifactInfoIndexCreator())
-            MavenIndexer.OSGI_METADATA   -> listOf(OsgiArtifactIndexCreator())
-            MavenIndexer.MAVEN_EXTRA -> listOf(MavenExtraArtifactInfoIndexCreator())
-        }
-    }.distinctBy { it.id }.toList()
+    fun indexCreators(indexers: MavenIndexerSettings.EnabledIndexersSettings) = buildList {
+        if (indexers.minimal || indexers.mavenExtra || indexers.mavenArchetype || indexers.mavenPlugin)
+            add(MinimalArtifactInfoIndexCreator())
+
+        if (indexers.mavenExtra)
+            add(MavenExtraArtifactInfoIndexCreator())
+
+        if (indexers.mavenArchetype)
+            add(MavenArchetypeArtifactInfoIndexCreator())
+
+        if (indexers.mavenPlugin)
+            add(MavenPluginArtifactInfoIndexCreator())
+
+        if (indexers.osgiMetadata)
+            add(OsgiArtifactIndexCreator())
+
+        if (indexers.jarContent)
+            add(JarFileContentsIndexCreator())
+    }
 
     private fun artifactContextProducer() = DefaultArtifactContextProducer(artifactPackagingMapper())
 
@@ -136,7 +141,7 @@ internal class MavenIndexerComponents(
 
     private fun incrementalHandler() = DefaultIncrementalHandler()
 
-    private fun mavenIndexer() = DefaultIndexer(searchEngine(), indexerEngine(), queryCreator())
+    private fun mavenIndexer(engine: IndexerEngine) = DefaultIndexer(searchEngine(), engine, queryCreator())
 
     private fun searchEngine() = DefaultSearchEngine()
 
@@ -144,16 +149,21 @@ internal class MavenIndexerComponents(
 
     private fun queryCreator() = DefaultQueryCreator()
 
-    private fun mavenIndexerService() = MavenIndexerService(
-        indexer = mavenIndexer(),
-        journalist = journalist,
-        mavenFacade = mavenFacade,
-        failureFacade = failureFacade,
-        storageFacade = storageFacade,
-        settings = mavenIndexerSettings,
-        components = this,
-        extensions = reposilite.extensions
-    )
+    private fun mavenIndexerService(): MavenIndexerService {
+        val engine = indexerEngine()
+
+        return MavenIndexerService(
+            indexer = mavenIndexer(engine),
+            indexerEngine = engine,
+            journalist = journalist,
+            mavenFacade = mavenFacade,
+            failureFacade = failureFacade,
+            storageFacade = storageFacade,
+            settings = mavenIndexerSettings,
+            components = this,
+            extensions = reposilite.extensions
+        )
+    }
 
     private fun settings(): MavenIndexerSettings = mavenIndexerSettings.get()
 }

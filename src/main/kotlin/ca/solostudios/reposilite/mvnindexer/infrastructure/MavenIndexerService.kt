@@ -4,6 +4,8 @@ import ca.solostudios.reposilite.mvnindexer.MavenIndexerComponents
 import ca.solostudios.reposilite.mvnindexer.MavenIndexerSettings
 import ca.solostudios.reposilite.mvnindexer.api.MavenIndexerSearchRequest
 import ca.solostudios.reposilite.mvnindexer.api.MavenIndexerSearchResponse
+import ca.solostudios.reposilite.mvnindexer.util.awaitTermination
+import ca.solostudios.reposilite.mvnindexer.util.scheduleAtFixedRate
 import com.reposilite.journalist.Journalist
 import com.reposilite.journalist.Logger
 import com.reposilite.maven.MavenFacade
@@ -28,6 +30,7 @@ import com.reposilite.storage.inputStream
 import com.reposilite.token.AccessTokenIdentifier
 import io.javalin.http.ContentType
 import io.javalin.http.ContentType.APPLICATION_OCTET_STREAM
+import korlibs.time.minutes
 import kotlinx.datetime.Clock
 import org.apache.lucene.index.MultiBits
 import org.apache.lucene.search.MatchAllDocsQuery
@@ -35,11 +38,13 @@ import org.apache.maven.index.ArtifactContext
 import org.apache.maven.index.ArtifactInfo
 import org.apache.maven.index.ArtifactScanningListener
 import org.apache.maven.index.Indexer
+import org.apache.maven.index.IndexerEngine
 import org.apache.maven.index.IteratorSearchRequest
 import org.apache.maven.index.NEXUS
 import org.apache.maven.index.ScanningResult
 import org.apache.maven.index.SearchType
 import org.apache.maven.index.artifact.VersionUtils
+import org.apache.maven.index.context.IndexCreator
 import org.apache.maven.index.context.IndexUtils
 import org.apache.maven.index.context.IndexingContext
 import panda.std.Result
@@ -53,66 +58,82 @@ import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
-import java.util.concurrent.TimeUnit
 import kotlin.io.path.exists
 import kotlin.io.path.extension
 import kotlin.io.path.isRegularFile
 import kotlin.io.path.name
 import kotlin.io.path.readAttributes
-import kotlin.time.DurationUnit.MILLISECONDS
+import kotlin.time.measureTime
 
 
 internal class MavenIndexerService(
     private val indexer: Indexer,
+    private val indexerEngine: IndexerEngine,
     private val journalist: Journalist,
     private val mavenFacade: MavenFacade,
     private val failureFacade: FailureFacade,
     private val storageFacade: StorageFacade,
     private val extensions: Extensions,
-    settings: Reference<MavenIndexerSettings>,
+    private val settings: Reference<MavenIndexerSettings>,
     private val components: MavenIndexerComponents,
 ) : Journalist {
     private var scheduler: ScheduledExecutorService = components.scheduler()
-    private lateinit var scheduledIndexingTask: ScheduledFuture<*>
+    private var scheduledIndexingTask: List<ScheduledFuture<*>> = listOf()
 
     init {
         settings.subscribeDetailed(::settingsUpdate, true)
     }
 
-    private fun settingsUpdate(oldSettings: MavenIndexerSettings, newSettings: MavenIndexerSettings) {
-        if (::scheduledIndexingTask.isInitialized)
-            scheduledIndexingTask.cancel(false)
+    private fun settingsUpdate(@Suppress("unused") oldSettings: MavenIndexerSettings, newSettings: MavenIndexerSettings) {
+        stopIndexingTasks()
 
-        scheduler.shutdown()
-        scheduler.awaitTermination(240L, TimeUnit.MINUTES)
         scheduler = components.scheduler()
 
         if (!newSettings.enabled)
             return
 
-        val durationMillis = newSettings.mavenIndexFullScanInterval.duration.toLong(MILLISECONDS)
-        scheduledIndexingTask = scheduler.scheduleAtFixedRate(::incrementalIndex, durationMillis, durationMillis, TimeUnit.MILLISECONDS)
+        scheduledIndexingTask = buildList {
+            newSettings.indexingTasks.filter { settings ->
+                settings.enabled
+            }.forEach { task ->
+                this += scheduler.scheduleAtFixedRate(task.interval.duration, task.interval.duration) {
+                    incrementalIndex(indexers = components.indexCreators(task.indexers))
+                }
+            }
+        }
     }
 
-    fun incrementalIndex(startPath: Location = Location.empty()): Result<Unit, ErrorResponse> {
+    fun allIndexers(): List<IndexCreator> = settings.map { settings ->
+        settings.indexingTasks.filter { it.enabled }.flatMap { task -> components.indexCreators(task.indexers) }.distinctBy { it.id }
+    }
+
+    fun incrementalIndex(startPath: Location = Location.empty(), indexers: List<IndexCreator>): Result<Unit, ErrorResponse> {
         val repositories = mavenFacade.getRepositories().filter { it.storageProvider is FileSystemStorageProvider }
         return repositories.asSequence().map { repository ->
-            incrementalIndex(repository, startPath).onError { error ->
+            incrementalIndex(repository, startPath, indexers).onError { error ->
                 logger.error("MavenIndexerService | Error while indexing repository: {}", error.message)
             }
         }.firstOrNull { it.isErr } ?: ok()
     }
 
-    fun incrementalIndex(repository: Repository, startPath: Location = Location.empty()): Result<Unit, ErrorResponse> {
+    fun incrementalIndex(
+        repository: Repository,
+        startPath: Location = Location.empty(),
+        indexers: List<IndexCreator>,
+    ): Result<Unit, ErrorResponse> {
         return repository.executeWithFsStorage { storageProvider ->
-            indexRepositoryLocation(repository, storageProvider, startPath)
+            indexRepositoryLocation(repository, storageProvider, startPath, indexers)
         }
     }
 
-    fun rebuildIndex(repository: Repository, startPath: Location = Location.empty()): Result<Unit, ErrorResponse> {
+    fun rebuildIndex(
+        repository: Repository,
+        startPath: Location = Location.empty(),
+        indexers: List<IndexCreator>
+    ): Result<Unit, ErrorResponse> {
         return purgeIndex(repository, startPath).flatMap {
             repository.executeWithFsStorage { storageProvider ->
-                indexRepositoryLocation(repository, storageProvider, startPath)
+                indexRepositoryLocation(repository, storageProvider, startPath, indexers)
             }
         }
     }
@@ -132,7 +153,7 @@ internal class MavenIndexerService(
             val startTime = Clock.System.now()
             logger.info("MavenIndexerService | Purging the {} repository", repository.name)
 
-            val indexingContext = components.indexingContext(repository, indexer, storageProvider)
+            val indexingContext = components.indexingContext(repository, indexer, emptyList(), storageProvider)
             try {
                 logger.debug("MavenIndexerService | Locating artifacts to delete")
 
@@ -188,9 +209,13 @@ internal class MavenIndexerService(
         }.flatMapErr { mavenFacade.findData(lookupRequest) }
     }
 
-    fun shutdown() {
-        scheduledIndexingTask.cancel(false)
+    fun stopIndexingTasks() {
+        for (task in scheduledIndexingTask)
+            task.cancel(false)
+
         scheduler.shutdown()
+        if (!scheduler.awaitTermination(240.minutes))
+            scheduler.shutdownNow()
     }
 
     private fun Repository.executeWithFsStorage(block: (FileSystemStorageProvider) -> Unit): Result<Unit, ErrorResponse> {
@@ -204,7 +229,7 @@ internal class MavenIndexerService(
                     synchronized(this) {
                         block(storageProvider)
                     }
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
                     failureFacade.throwException("MavenIndexerService | exception while executing scheduled task for repository $name", e)
                 }
             }.asSuccess()
@@ -214,32 +239,39 @@ internal class MavenIndexerService(
         repository: Repository,
         storageProvider: FileSystemStorageProvider,
         startPath: Location,
+        indexers: List<IndexCreator>,
     ) {
         logger.info("MavenIndexerService | Indexing the {} repository", repository.name)
-        val indexingContext = components.indexingContext(repository, indexer, storageProvider)
 
-        try {
-            val scanner = components.scanner()
-            val searcher = indexingContext.acquireIndexSearcher()
-
-            logger.debug("MavenIndexerService | Scanning the {} repository", repository.name)
-            scanner.scan(components.scanningRequest(indexingContext, ReindexArtifactScanningListener(indexingContext), startPath))
+        val time = measureTime {
+            val indexingContext = components.indexingContext(repository, indexer, indexers, storageProvider)
 
             try {
-                logger.debug("MavenIndexerService | Packing the {} repository", repository.name)
-                val packer = components.indexPacker()
+                val scanner = components.scanner()
+                val searcher = indexingContext.acquireIndexSearcher()
 
-                packer.packIndex(components.indexPackingRequest(indexingContext, searcher, repository))
+                logger.debug("MavenIndexerService | Scanning the {} repository", repository.name)
+                scanner.scan(components.scanningRequest(indexingContext, ReindexArtifactScanningListener(indexingContext), startPath))
+                // scanner.scan(components.scanningRequest(indexingContext, DefaultScannerListener(indexingContext, components.indexerEngine(), false, null), startPath))
 
-                indexingContext.commit()
-            } catch (e: Exception) {
-                failureFacade.throwException("MavenIndexerService | Could not pack index for ${repository.name}", e)
+                try {
+                    logger.debug("MavenIndexerService | Packing the {} repository", repository.name)
+                    val packer = components.indexPacker()
+
+                    packer.packIndex(components.indexPackingRequest(indexingContext, searcher, repository))
+
+                    indexingContext.commit()
+                } catch (e: Exception) {
+                    failureFacade.throwException("MavenIndexerService | Could not pack index for ${repository.name}", e)
+                } finally {
+                    indexingContext.releaseIndexSearcher(searcher)
+                }
             } finally {
-                indexingContext.releaseIndexSearcher(searcher)
+                indexer.closeIndexingContext(indexingContext, false)
             }
-        } finally {
-            indexer.closeIndexingContext(indexingContext, false)
         }
+
+        logger.info("MavenIndexerService | Indexed the {} repository in {}", repository.name, time)
     }
 
     private fun <T> resolve(
@@ -319,6 +351,7 @@ internal class MavenIndexerService(
 
         override fun scanningStarted(context: IndexingContext) {
             try {
+                logger.info("Initialize")
                 initialize(context)
             } catch (ex: IOException) {
                 exceptions += ex
@@ -341,6 +374,7 @@ internal class MavenIndexerService(
                             artifactsToProcess[artifactInfo.uinfo] = artifactInfo // if not receiving external updates
                     }
                 }
+                logger.info("Artifacts to process: {}", artifactsToProcess)
             } finally {
                 context.releaseIndexSearcher(indexSearcher)
             }
@@ -360,11 +394,13 @@ internal class MavenIndexerService(
 
             processedUinfos += artifactInfo.uinfo
 
-            if (artifactInfo.uinfo in artifactsToProcess)
+            if (artifactInfo.uinfo in artifactsToProcess) {
                 artifactsToProcess -= artifactInfo.uinfo
+                return
+            }
 
             try {
-                indexer.addArtifactToIndex(artifactContext, context)
+                indexerEngine.update(context, artifactContext)
 
                 exceptions += artifactContext.errors
 
